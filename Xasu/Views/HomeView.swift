@@ -145,23 +145,67 @@ struct HomeView: View {
     }
 
     private var modeBadge: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(connectionVM.connectionMode == .vpn ? Color.xasuCyan : Color.xasuPurple)
-                .frame(width: 5, height: 5)
-                .shadow(color: connectionVM.connectionMode == .vpn ? Color.xasuCyan : Color.xasuPurple, radius: 4)
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(connectionVM.connectionMode == .vpn ? Color.xasuCyan : Color.xasuPurple)
+                    .frame(width: 5, height: 5)
+                    .shadow(color: connectionVM.connectionMode == .vpn ? Color.xasuCyan : Color.xasuPurple, radius: 4)
 
-            Text(connectionVM.connectionMode.label)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
+                Text(connectionVM.connectionMode.label)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.textSecondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .liquidGlass(
+                cornerRadius: 20,
+                tintColor: connectionVM.connectionMode == .vpn ? .xasuCyan : .xasuPurple,
+                tintOpacity: 0.07
+            )
+
+            // PAC URL карточка — показывается в SOCKS режиме
+            if connectionVM.connectionMode == .socks {
+                pacCard
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+    }
+
+    private var pacCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(red: 0.95, green: 0.75, blue: 0.2))
+                Text("Proxy setup required")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+            }
+
+            Text("Settings → Wi-Fi → (i) → Configure Proxy → Automatic")
+                .font(.system(size: 11, design: .rounded))
                 .foregroundStyle(Color.textSecondary)
+
+            Button(action: {
+                UIPasteboard.general.string = PACServer.shared.pacURL
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10))
+                    Text(PACServer.shared.pacURL)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                }
+                .foregroundStyle(Color.xasuCyan)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .liquidGlass(
-            cornerRadius: 20,
-            tintColor: connectionVM.connectionMode == .vpn ? .xasuCyan : .xasuPurple,
-            tintOpacity: 0.07
-        )
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .liquidGlass(cornerRadius: 16, tintColor: .yellow, tintOpacity: 0.05)
+        .padding(.horizontal, 20)
     }
 
     private var activePresetsLabel: some View {

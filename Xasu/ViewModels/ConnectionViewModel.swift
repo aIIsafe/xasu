@@ -23,6 +23,7 @@ final class ConnectionViewModel {
 
     private let vpn        = VPNManager.shared
     private let socks      = ByeDPIService.shared
+    private let pac        = PACServer.shared
     private let logger     = AppLogger.shared
     private let settingsVM: SettingsViewModel
 
@@ -83,9 +84,13 @@ final class ConnectionViewModel {
             case .success:
                 self.connectionState = .connected
                 self.connectionMode  = .socks
+                self.pac.start()
                 self.logger.log("SOCKS5 proxy running on 127.0.0.1:10800", level: .success)
-                self.logger.log("Configure proxy: Settings → Wi-Fi → your network → Proxy → Manual", level: .info)
-                self.logger.log("  Server: 127.0.0.1  Port: 10800", level: .info)
+                self.logger.log("PAC server: \(self.pac.pacURL)", level: .success)
+                self.logger.log("━━━ CONFIGURE iOS PROXY ━━━", level: .info)
+                self.logger.log("Settings → Wi-Fi → (i) → Configure Proxy → Automatic", level: .info)
+                self.logger.log("URL: \(self.pac.pacURL)", level: .info)
+                self.logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━", level: .info)
             case .failure(let msg):
                 self.connectionState = .error(msg)
                 self.errorMessage    = msg
@@ -102,6 +107,7 @@ final class ConnectionViewModel {
             vpn.stop()
         } else {
             socks.stop()
+            pac.stop()
         }
         connectionState = .disconnected
         logger.log("Disconnected", level: .info)
