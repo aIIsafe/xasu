@@ -179,11 +179,15 @@ private struct LogRow: View {
 // MARK: - Share Sheet
 
 struct ShareSheet: UIViewControllerRepresentable {
-    let text: String
+    var text: String? = nil
+    var items: [Any]? = nil
+
+    init(text: String) { self.text = text }
+    init(items: [Any]) { self.items = items }
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        let items: [Any] = [text]
-        let vc = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        let activityItems: [Any] = items ?? [text ?? ""]
+        let vc = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
         return vc
     }
 

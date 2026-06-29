@@ -35,7 +35,7 @@ struct SettingsView: View {
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showDNSShareSheet) {
             if let url = dnsProfileURL {
-                ShareSheet(items: [url])
+                ShareSheet(items: [url as Any])
             }
         }
     }
