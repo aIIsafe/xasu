@@ -21,7 +21,7 @@ final class VPNManager {
     private var manager: NETunnelProviderManager?
 
     // Bundle ID Network Extension таргета (должен совпадать с XasuTunnel target)
-    private let tunnelBundleID = "com.xasu.dpiswitch.tunnel"
+    private let tunnelBundleID = "com.xasu.dpiswitch.tunnel" // prefixed under com.xasu.dpiswitch
 
     // MARK: - Инициализация
 
