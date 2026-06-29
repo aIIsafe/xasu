@@ -5,6 +5,10 @@ struct SettingsView: View {
     @Bindable var viewModel: SettingsViewModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var selectedDNSProvider: DNSProfileGenerator.Provider = .comss
+    @State private var showDNSShareSheet = false
+    @State private var dnsProfileURL: URL?
+
     var body: some View {
         ZStack {
             AnimatedBackground()
@@ -17,6 +21,8 @@ struct SettingsView: View {
 
                     servicesSection
 
+                    dnsProfileSection
+
                     howItWorksSection
 
                     aboutSection
@@ -27,6 +33,11 @@ struct SettingsView: View {
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showDNSShareSheet) {
+            if let url = dnsProfileURL {
+                ShareSheet(items: [url])
+            }
+        }
     }
 
     // MARK: - Шапка
@@ -72,6 +83,65 @@ struct SettingsView: View {
                 }
             }
             .liquidGlass(cornerRadius: 20, tintColor: .white, tintOpacity: 0.03)
+        }
+    }
+
+    // MARK: - DNS профиль (работает на LTE без VPN)
+
+    private var dnsProfileSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionLabel("DNS профиль для LTE", icon: "network.badge.shield.half.filled")
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Зашифрованный DNS обходит DNS-блокировки РКН на **Wi-Fi и LTE** без VPN и без сервера. Установи профиль один раз.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().background(Color.appSeparator)
+
+                // Выбор провайдера
+                VStack(spacing: 8) {
+                    ForEach(DNSProfileGenerator.Provider.allCases, id: \.self) { provider in
+                        Button {
+                            selectedDNSProvider = provider
+                        } label: {
+                            HStack {
+                                Image(systemName: selectedDNSProvider == provider ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedDNSProvider == provider ? Color.xasuCyan : Color.textTertiary)
+                                Text(provider.displayName)
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(.white)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Divider().background(Color.appSeparator)
+
+                Button {
+                    dnsProfileURL = DNSProfileGenerator.saveToTemp(provider: selectedDNSProvider)
+                    showDNSShareSheet = true
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.down.doc.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Скачать профиль (.mobileconfig)")
+                            .font(.system(size: 14, weight: .semibold))
+                        Spacer()
+                    }
+                    .foregroundStyle(Color.xasuCyan)
+                }
+                .buttonStyle(.plain)
+
+                Text("После скачивания: Настройки → Загруженный профиль → Установить")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textTertiary)
+            }
+            .padding(16)
+            .liquidGlass(cornerRadius: 20, tintColor: .white, tintOpacity: 0.02)
         }
     }
 

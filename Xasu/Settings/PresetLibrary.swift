@@ -14,15 +14,19 @@ enum PresetLibrary {
     //   -s 0+sm   — split в середине SNI (наиболее эффективно)
     // Позиции ОБЯЗАНЫ идти по возрастанию при объединении.
 
+    // YouTube: множественный сплит на позициях TLS ClientHello.
+    // ТСПУ читает SNI из ClientHello — разбиваем его на несколько TCP-сегментов.
+    // Позиции 1+s,3+s,6+s,9+s = сплит до SNI + на нескольких точках внутри.
     static let youtube = ServicePreset(
         id: "youtube",
         name: "YouTube",
         systemIconName: "play.rectangle.fill",
-        cmdArgs: ["-s", "1+s"],
-        strategyDescription: "Split at SNI offset +1",
+        cmdArgs: ["-s", "1+s", "-s", "3+s", "-s", "6+s", "-s", "9+s"],
+        strategyDescription: "Multi-split at TLS SNI offsets (TSPU bypass)",
         isEnabled: false
     )
 
+    // TikTok: сплит в середине SNI
     static let tiktok = ServicePreset(
         id: "tiktok",
         name: "TikTok",
@@ -32,15 +36,17 @@ enum PresetLibrary {
         isEnabled: false
     )
 
+    // Discord: сплит на позиции 3 (перед расширениями TLS)
     static let discord = ServicePreset(
         id: "discord",
         name: "Discord",
         systemIconName: "bubble.left.and.bubble.right.fill",
-        cmdArgs: ["-s", "3"],
-        strategyDescription: "TCP Split at position 3",
+        cmdArgs: ["-s", "1+s", "-s", "3"],
+        strategyDescription: "Split before TLS extensions",
         isEnabled: false
     )
 
+    // Instagram: сплит на позиции 2
     static let instagram = ServicePreset(
         id: "instagram",
         name: "Instagram",
@@ -50,7 +56,17 @@ enum PresetLibrary {
         isEnabled: false
     )
 
-    static var all: [ServicePreset] { [youtube, tiktok, discord, instagram] }
+    // Универсальный: агрессивный многопозиционный сплит, работает для большинства сервисов
+    static let universal = ServicePreset(
+        id: "universal",
+        name: "Все сервисы",
+        systemIconName: "globe",
+        cmdArgs: ["-s", "0+sm", "-s", "1+s", "-s", "3+s", "-s", "6"],
+        strategyDescription: "Universal multi-split (YouTube + others)",
+        isEnabled: false
+    )
+
+    static var all: [ServicePreset] { [youtube, tiktok, discord, instagram, universal] }
 
     // ── Формирование аргументов ───────────────────────────────────────────────
     // Возвращает ТОЛЬКО DPI-evasion аргументы (без --ip/--port).
