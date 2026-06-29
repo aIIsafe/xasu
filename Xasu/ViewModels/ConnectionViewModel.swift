@@ -2,69 +2,128 @@ import Foundation
 import Observation
 import NetworkExtension
 
+enum ConnectionMode {
+    case vpn    // Полный VPN туннель (Wi-Fi + LTE)
+    case socks  // Локальный SOCKS5 прокси (только Wi-Fi при ручной настройке)
+
+    var label: String {
+        switch self {
+        case .vpn:   return "VPN • Wi-Fi + LTE"
+        case .socks: return "SOCKS5 • 127.0.0.1:10800"
+        }
+    }
+}
+
 @Observable
 final class ConnectionViewModel {
 
     private(set) var connectionState: ConnectionState = .disconnected
+    private(set) var connectionMode:  ConnectionMode  = .vpn
     var errorMessage: String?
 
-    private let vpn = VPNManager.shared
+    private let vpn        = VPNManager.shared
+    private let socks      = ByeDPIService.shared
+    private let logger     = AppLogger.shared
     private let settingsVM: SettingsViewModel
 
     init(settingsVM: SettingsViewModel) {
         self.settingsVM = settingsVM
-        syncStateFromVPN()
+        syncState()
     }
+
+    // MARK: - Публичное API
 
     func toggleConnection() {
         switch connectionState {
-        case .disconnected, .error:
-            connect()
-        case .connected:
-            disconnect()
-        case .connecting:
-            break
+        case .disconnected, .error: connect()
+        case .connected:            disconnect()
+        case .connecting:           break
         }
     }
 
-    // MARK: - Наблюдение за статусом VPN
-
-    func syncStateFromVPN() {
-        connectionState = mapStatus(vpn.status)
-    }
-
     func onVPNStatusChange() {
-        connectionState = mapStatus(vpn.status)
+        // Обновляем только если в VPN режиме
+        guard connectionMode == .vpn else { return }
+        connectionState = mapVPNStatus(vpn.status)
+        if case .connected = connectionState {
+            logger.log("VPN connected (Wi-Fi + LTE)", level: .success)
+        }
     }
 
-    // MARK: - Приватное
+    // MARK: - Подключение
 
     private func connect() {
         connectionState = .connecting
-        let args = settingsVM.combinedArgs
+        logger.log("Connecting... Args: \(settingsVM.combinedArgs.prefix(60))...", level: .info)
 
         Task { @MainActor in
             do {
-                try await vpn.start(args: args)
+                // Сначала пробуем VPN туннель
+                logger.log("Trying VPN mode (NEPacketTunnelProvider)...", level: .debug)
+                try await vpn.start(args: settingsVM.combinedArgs)
+                connectionMode = .vpn
+                logger.log("VPN mode started ✓", level: .success)
             } catch {
-                self.connectionState = .error(error.localizedDescription)
-                self.errorMessage = error.localizedDescription
+                // VPN не доступен (нет entitlement или ошибка подписи) → SOCKS fallback
+                logger.log("VPN unavailable: \(error.localizedDescription)", level: .warning)
+                logger.log("Falling back to SOCKS5 proxy mode...", level: .info)
+                startSOCKSFallback()
             }
         }
     }
 
-    private func disconnect() {
-        vpn.stop()
-        connectionState = .disconnected
+    private func startSOCKSFallback() {
+        let args = settingsVM.combinedArgs
+        logger.log("Starting byedpi SOCKS5 on 127.0.0.1:10800", level: .debug)
+
+        socks.start(args: args) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.connectionState = .connected
+                self.connectionMode  = .socks
+                self.logger.log("SOCKS5 proxy running on 127.0.0.1:10800", level: .success)
+                self.logger.log("Configure proxy: Settings → Wi-Fi → your network → Proxy → Manual", level: .info)
+                self.logger.log("  Server: 127.0.0.1  Port: 10800", level: .info)
+            case .failure(let msg):
+                self.connectionState = .error(msg)
+                self.errorMessage    = msg
+                self.logger.log("SOCKS5 failed: \(msg)", level: .error)
+            }
+        }
     }
 
-    private func mapStatus(_ status: NEVPNStatus) -> ConnectionState {
+    // MARK: - Отключение
+
+    private func disconnect() {
+        logger.log("Disconnecting (\(connectionMode == .vpn ? "VPN" : "SOCKS"))...", level: .info)
+        if connectionMode == .vpn {
+            vpn.stop()
+        } else {
+            socks.stop()
+        }
+        connectionState = .disconnected
+        logger.log("Disconnected", level: .info)
+    }
+
+    // MARK: - Утилиты
+
+    private func syncState() {
+        if socks.isRunning {
+            connectionState = .connected
+            connectionMode  = .socks
+        } else {
+            connectionState = mapVPNStatus(vpn.status)
+        }
+    }
+
+    private func mapVPNStatus(_ status: NEVPNStatus) -> ConnectionState {
         switch status {
-        case .connected:                       return .connected
-        case .connecting, .reasserting:        return .connecting
-        case .disconnecting, .disconnected:    return .disconnected
-        case .invalid:                         return .error("VPN profile not found")
-        @unknown default:                      return .disconnected
+        case .connected:                    return .connected
+        case .connecting, .reasserting:     return .connecting
+        case .disconnecting, .disconnected: return .disconnected
+        case .invalid:                      return .disconnected
+        @unknown default:                   return .disconnected
         }
     }
 }

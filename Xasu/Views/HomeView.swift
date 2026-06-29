@@ -4,13 +4,14 @@ struct HomeView: View {
 
     @State private var settingsVM = SettingsViewModel()
     @State private var connectionVM: ConnectionViewModel
+
     @State private var showSettings = false
-    @State private var headerScale: CGFloat = 0.85
-    @State private var headerOpacity: Double = 0.0
+    @State private var showLogs     = false
+    @State private var appeared     = false
 
     init() {
         let s = SettingsViewModel()
-        _settingsVM = State(initialValue: s)
+        _settingsVM  = State(initialValue: s)
         _connectionVM = State(initialValue: ConnectionViewModel(settingsVM: s))
     }
 
@@ -20,29 +21,34 @@ struct HomeView: View {
 
             VStack(spacing: 0) {
 
-                // ── Лого ──────────────────────────────────────────────
-                headerView
-                    .padding(.top, 64)
-                    .scaleEffect(headerScale)
-                    .opacity(headerOpacity)
+                // ── Шапка ─────────────────────────────────────────────
+                topBar
+                    .padding(.top, 56)
+                    .opacity(appeared ? 1 : 0)
+                    .offset(y: appeared ? 0 : -12)
 
                 Spacer()
 
-                // ── Главная кнопка ────────────────────────────────────
+                // ── Кнопка подключения ────────────────────────────────
                 ConnectButton(
                     state: connectionVM.connectionState,
                     action: { connectionVM.toggleConnection() }
                 )
+                .opacity(appeared ? 1 : 0)
+                .scaleEffect(appeared ? 1 : 0.85)
 
                 // ── Статус ────────────────────────────────────────────
                 statusBlock
-                    .padding(.top, 32)
+                    .padding(.top, 28)
+                    .opacity(appeared ? 1 : 0)
+                    .offset(y: appeared ? 0 : 10)
 
                 Spacer()
 
-                // ── Кнопка настроек ──────────────────────────────────
-                settingsButton
-                    .padding(.bottom, 52)
+                // ── Нижние кнопки ─────────────────────────────────────
+                bottomBar
+                    .padding(.bottom, 48)
+                    .opacity(appeared ? 1 : 0)
             }
         }
         .ignoresSafeArea()
@@ -58,13 +64,14 @@ struct HomeView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(viewModel: settingsVM)
         }
+        .sheet(isPresented: $showLogs) {
+            LogsView()
+        }
         .onAppear {
-            withAnimation(.spring(response: 0.7, dampingFraction: 0.8).delay(0.2)) {
-                headerScale = 1.0
-                headerOpacity = 1.0
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(0.1)) {
+                appeared = true
             }
         }
-        // Синхронизируем connectionState с реальным VPN статусом
         .onChange(of: VPNManager.shared.status) { _, _ in
             connectionVM.onVPNStatusChange()
         }
@@ -72,91 +79,124 @@ struct HomeView: View {
 
     // MARK: - Компоненты
 
-    private var headerView: some View {
-        VStack(spacing: 6) {
-            // Логотип XASU
-            Text("XASU")
-                .font(.system(size: 38, weight: .black, design: .rounded))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Color.xasuCyan, Color.xasuPurple],
-                        startPoint: .leading,
-                        endPoint: .trailing
+    private var topBar: some View {
+        HStack {
+            // Лого
+            VStack(alignment: .leading, spacing: 3) {
+                Text("XASU")
+                    .font(.system(size: 32, weight: .black, design: .rounded))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [Color.xasuCyan, Color.xasuPurple],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
                     )
-                )
-                .shadow(color: Color.xasuPurple.opacity(0.5), radius: 12)
+                    .shadow(color: Color.xasuPurple.opacity(0.4), radius: 8)
 
-            Text("DPI Bypass")
-                .font(.system(size: 13, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.textSecondary)
-                .tracking(2.5)
-                .textCase(.uppercase)
+                Text("DPI BYPASS")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.textTertiary)
+                    .tracking(3)
+            }
+
+            Spacer()
+
+            // Кнопка логов
+            Button(action: { showLogs = true }) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Color.textSecondary)
+                    .frame(width: 36, height: 36)
+                    .liquidGlass(cornerRadius: 12, tintColor: .white, tintOpacity: 0.04)
+            }
+            .buttonStyle(.plain)
+            .overlay(alignment: .topTrailing) {
+                if !AppLogger.shared.entries.isEmpty {
+                    Circle()
+                        .fill(Color.xasuCyan)
+                        .frame(width: 8, height: 8)
+                        .offset(x: 2, y: -2)
+                }
+            }
         }
+        .padding(.horizontal, 24)
     }
 
     private var statusBlock: some View {
         VStack(spacing: 8) {
+            // Статус текст
             Text(connectionVM.connectionState.displayTitle)
                 .font(.system(size: 20, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
                 .contentTransition(.numericText())
                 .animation(.spring(response: 0.35), value: connectionVM.connectionState)
 
+            // Бейдж режима (VPN / SOCKS)
             if connectionVM.connectionState.isActive {
-                networkBadge
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                modeBadge
+                    .transition(.scale(scale: 0.8).combined(with: .opacity))
             }
 
+            // Активные сервисы
             activePresetsLabel
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: connectionVM.connectionState)
     }
 
-    private var networkBadge: some View {
+    private var modeBadge: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(Color.xasuCyan)
-                .frame(width: 6, height: 6)
-                .shadow(color: Color.xasuCyan, radius: 5)
-            Text("Wi-Fi · LTE protected")
+                .fill(connectionVM.connectionMode == .vpn ? Color.xasuCyan : Color.xasuPurple)
+                .frame(width: 5, height: 5)
+                .shadow(color: connectionVM.connectionMode == .vpn ? Color.xasuCyan : Color.xasuPurple, radius: 4)
+
+            Text(connectionVM.connectionMode.label)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(Color.textSecondary)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
-        .liquidGlass(cornerRadius: 20, tintColor: .xasuCyan, tintOpacity: 0.07)
+        .liquidGlass(
+            cornerRadius: 20,
+            tintColor: connectionVM.connectionMode == .vpn ? .xasuCyan : .xasuPurple,
+            tintOpacity: 0.07
+        )
     }
 
     private var activePresetsLabel: some View {
         let enabled = settingsVM.presets.filter(\.isEnabled)
         let text: String
-        if enabled.isEmpty           { text = "No services selected" }
-        else if enabled.count == 1   { text = enabled[0].name }
-        else                         { text = enabled.map(\.name).joined(separator: " · ") }
+        if enabled.isEmpty         { text = "No services selected" }
+        else if enabled.count == 1 { text = enabled[0].name }
+        else                       { text = enabled.map(\.name).joined(separator: " · ") }
 
         return Text(text)
-            .font(.system(size: 13, weight: .regular, design: .rounded))
+            .font(.system(size: 13, design: .rounded))
             .foregroundStyle(Color.textTertiary)
             .padding(.top, 2)
     }
 
-    private var settingsButton: some View {
-        Button(action: {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            showSettings = true
-        }) {
-            HStack(spacing: 8) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 14, weight: .medium))
-                Text("Services")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+    private var bottomBar: some View {
+        HStack(spacing: 12) {
+            // Settings
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                showSettings = true
+            }) {
+                HStack(spacing: 7) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("Services")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(Color.textSecondary)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 13)
+                .liquidGlass(cornerRadius: 22, tintColor: .white, tintOpacity: 0.03)
             }
-            .foregroundStyle(Color.textSecondary)
-            .padding(.horizontal, 26)
-            .padding(.vertical, 13)
-            .liquidGlass(cornerRadius: 24, tintColor: .white, tintOpacity: 0.03)
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 }
 

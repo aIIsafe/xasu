@@ -49,6 +49,11 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Xasu/Xasu.entitlements
 
     dependencies:
+      # SwByeDPI нужен для SOCKS fallback (когда VPN entitlement недоступен)
+      - package: SwByeDPI
+        product: SwByeDPI
+      - package: SwByeDPI
+        product: ByeDPIKit
       # Внедряем extension в бандл приложения
       - target: XasuTunnel
         embed: true

@@ -5,10 +5,11 @@ struct ConnectButton: View {
     let state: ConnectionState
     let action: () -> Void
 
-    @State private var pulseScale: CGFloat = 1.0
+    @State private var pulseOpacity: Double = 0
+    @State private var pulseScale: CGFloat = 0.85
     @State private var isPressed = false
 
-    private var isActive: Bool { state == .connected }
+    private var isActive:     Bool { state == .connected }
     private var isConnecting: Bool { state == .connecting }
 
     var body: some View {
@@ -17,108 +18,90 @@ struct ConnectButton: View {
             action()
         }) {
             ZStack {
-                // Внешнее пульсирующее кольцо (только при подключении)
-                if isConnecting {
+                // Внешнее пульсирующее кольцо
+                if isActive || isConnecting {
                     Circle()
-                        .strokeBorder(Color.xasuPurple.opacity(0.4), lineWidth: 2)
-                        .frame(width: 150, height: 150)
-                        .scaleEffect(pulseScale)
-                        .opacity(2.5 - pulseScale * 1.5)
-                        .animation(
-                            .easeOut(duration: 1.2).repeatForever(autoreverses: false),
-                            value: pulseScale
+                        .strokeBorder(
+                            isActive
+                                ? Color.xasuCyan.opacity(0.35)
+                                : Color.xasuPurple.opacity(0.4),
+                            lineWidth: 1.5
                         )
+                        .frame(width: 154, height: 154)
+                        .scaleEffect(pulseScale)
+                        .opacity(pulseOpacity)
                 }
 
-                // Второе пульсирующее кольцо при connected
-                if isActive {
-                    Circle()
-                        .strokeBorder(Color.xasuCyan.opacity(0.25), lineWidth: 1.5)
-                        .frame(width: 145, height: 145)
-                        .scaleEffect(pulseScale)
-                        .opacity(2 - pulseScale)
-                        .animation(
-                            .easeOut(duration: 2.0).repeatForever(autoreverses: false),
-                            value: pulseScale
-                        )
-                }
-
-                // Основная кнопка
+                // Основной круг
                 ZStack {
-                    // Градиентный фон
+                    // Фон-градиент
                     Circle()
-                        .fill(buttonGradient)
+                        .fill(fillGradient)
                         .frame(width: 120, height: 120)
-                        .shadow(color: shadowColor, radius: isActive ? 30 : 12, x: 0, y: 6)
 
-                    // Glass оверлей
+                    // Material glass overlay
                     Circle()
-                        .fill(.ultraThinMaterial.opacity(0.4))
+                        .fill(.ultraThinMaterial.opacity(isActive ? 0.25 : 0.4))
                         .frame(width: 120, height: 120)
 
                     // Обводка
                     Circle()
                         .strokeBorder(
                             LinearGradient(
-                                colors: [.white.opacity(0.35), .white.opacity(0.05)],
+                                colors: [.white.opacity(0.3), .white.opacity(0.05)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             ),
-                            lineWidth: 1
+                            lineWidth: 0.8
                         )
                         .frame(width: 120, height: 120)
 
                     // Иконка
-                    buttonIcon
-                        .font(.system(size: 36, weight: .semibold))
-                        .foregroundStyle(iconColor)
-                        .shadow(color: iconColor.opacity(0.6), radius: isActive ? 8 : 0)
+                    if isConnecting {
+                        ProgressView()
+                            .tint(.white)
+                            .scaleEffect(1.3)
+                    } else {
+                        Image(systemName: "power")
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(iconColor)
+                            .shadow(color: iconColor.opacity(isActive ? 0.7 : 0.2), radius: isActive ? 10 : 0)
+                    }
                 }
-                .scaleEffect(isPressed ? 0.94 : 1.0)
-                .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isPressed)
-                .animation(.spring(response: 0.45, dampingFraction: 0.75), value: state)
+                .shadow(color: shadowColor, radius: isActive ? 28 : 10, x: 0, y: 6)
+                .scaleEffect(isPressed ? 0.93 : 1.0)
             }
         }
         .buttonStyle(.plain)
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isPressed)
+        .animation(.spring(response: 0.5, dampingFraction: 0.75), value: state)
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in isPressed = true }
                 .onEnded   { _ in isPressed = false }
         )
-        .onAppear { startPulse() }
-        .onChange(of: state) { _, _ in startPulse() }
+        .onAppear { animatePulse() }
+        .onChange(of: state) { _, _ in animatePulse() }
     }
 
-    // MARK: - Хелперы
+    // MARK: - Стили
 
-    @ViewBuilder
-    private var buttonIcon: some View {
-        if isConnecting {
-            ProgressView()
-                .tint(.white)
-                .scaleEffect(1.2)
-        } else {
-            Image(systemName: isActive ? "checkmark.shield.fill" : "shield.slash.fill")
-                .contentTransition(.symbolEffect(.replace))
-        }
-    }
-
-    private var buttonGradient: LinearGradient {
+    private var fillGradient: LinearGradient {
         if isActive {
             return LinearGradient(
-                colors: [Color.xasuCyan.opacity(0.9), Color.xasuPurple],
+                colors: [Color.xasuCyan.opacity(0.75), Color.xasuPurple],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
         } else if isConnecting {
             return LinearGradient(
-                colors: [Color.xasuPurple.opacity(0.8), Color.buttonInactive],
+                colors: [Color.xasuPurple.opacity(0.7), Color.buttonInactive],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
         } else {
             return LinearGradient(
-                colors: [Color.buttonInactive, Color.buttonInactive.opacity(0.7)],
+                colors: [Color(red: 0.14, green: 0.12, blue: 0.22), Color(red: 0.10, green: 0.09, blue: 0.16)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -126,28 +109,34 @@ struct ConnectButton: View {
     }
 
     private var shadowColor: Color {
-        isActive ? Color.xasuCyan.opacity(0.5) : Color.xasuPurple.opacity(0.25)
+        isActive ? Color.xasuCyan.opacity(0.45) : Color.xasuPurple.opacity(0.2)
     }
 
     private var iconColor: Color {
-        isActive ? .white : Color.xasuPurple.opacity(0.9)
+        isActive ? .white : Color.xasuPurple.opacity(0.85)
     }
 
-    private func startPulse() {
-        pulseScale = 1.0
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            pulseScale = 1.45
+    private func animatePulse() {
+        guard isActive || isConnecting else {
+            pulseOpacity = 0; pulseScale = 0.85
+            return
+        }
+        pulseScale = 0.85; pulseOpacity = 0.9
+        withAnimation(
+            .easeOut(duration: isConnecting ? 1.1 : 1.6).repeatForever(autoreverses: false)
+        ) {
+            pulseScale = 1.3; pulseOpacity = 0
         }
     }
 }
 
 #Preview {
     ZStack {
-        Color.xasuBackground
+        Color.xasuBackground.ignoresSafeArea()
         VStack(spacing: 40) {
             ConnectButton(state: .disconnected, action: {})
-            ConnectButton(state: .connecting, action: {})
-            ConnectButton(state: .connected, action: {})
+            ConnectButton(state: .connecting,   action: {})
+            ConnectButton(state: .connected,    action: {})
         }
     }
 }
