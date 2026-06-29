@@ -14,50 +14,54 @@ final class ByeDPIService {
     var isRunning: Bool { ByeDPI.proxyStarted }
     var proxyAddress: String { "127.0.0.1:10800" }
 
-    private let startDelay: TimeInterval = 0.8   // ждём освобождения порта
-    private let maxRetries = 3
-
     func start(args: [String], completion: @escaping (ProxyStartResult) -> Void) {
-        // Всегда останавливаем предыдущий экземпляр
-        if isRunning { _ = ByeDPI.stop() }
+        // Полная остановка — forceStop закрывает server_fd напрямую,
+        // не зависая на fake SOCKS Hello. Это освобождает порт быстрее.
+        _ = ByeDPI.forceStop()
+        _ = ByeDPI.stop()
 
-        // Ждём освобождения порта, затем запускаем (с retry)
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + startDelay) {
-            self.attemptStart(args: args, retriesLeft: self.maxRetries, completion: completion)
+        // Небольшая пауза для освобождения порта ОС
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.6) {
+            self.attemptStart(args: args, retriesLeft: 2, completion: completion)
         }
     }
 
     private func attemptStart(args: [String], retriesLeft: Int, completion: @escaping (ProxyStartResult) -> Void) {
-        var didCallback = false
+        var callbackFired = false
 
         ByeDPI.start(args: args) { [weak self] error in
-            guard !didCallback else { return }
+            guard !callbackFired else { return }
             let msg = error.errorDescription
-            // Порт занят — попробуем ещё раз
-            if (msg.contains("-2") || msg.contains("address already in use")) && retriesLeft > 0 {
-                _ = ByeDPI.stop()
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) {
+
+            // Извлекаем код ошибки через pattern matching
+            var errCode: Int? = nil
+            if case .startError(let code) = error { errCode = code }
+
+            // -2 (порт занят / неверный аргумент) — форс-стоп и повтор
+            if errCode == -2 && retriesLeft > 0 {
+                _ = ByeDPI.forceStop()
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.0) {
                     self?.attemptStart(args: args, retriesLeft: retriesLeft - 1, completion: completion)
                 }
             } else {
-                didCallback = true
+                callbackFired = true
                 DispatchQueue.main.async { completion(.failure(msg)) }
             }
         }
 
-        // Даём 1 секунду на старт
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            guard !didCallback else { return }
+        // Проверяем успешный старт через 1.2 секунды
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard !callbackFired else { return }
             if ByeDPI.proxyStarted {
-                didCallback = true
+                callbackFired = true
                 completion(.success)
             }
+            // Если не запустился и нет ошибки — ждём callback
         }
     }
 
-    @discardableResult
-    func stop() -> Bool {
-        let result = ByeDPI.stop()
-        return result == 0
+    func stop() {
+        _ = ByeDPI.forceStop()
+        _ = ByeDPI.stop()
     }
 }

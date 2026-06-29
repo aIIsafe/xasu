@@ -3,12 +3,12 @@ import Foundation
 enum PresetLibrary {
 
     // ── Пресеты ───────────────────────────────────────────────────────────────
-    // Используем только iOS-совместимые флаги:
-    //   -s N          — разбить TLS ClientHello на позиции N (TCP split, работает в sandbox)
-    //   --fake-sni X  — подставить фейковый SNI в первый фрагмент
-    //   --tlsrec N    — разбить TLS-запись (работает без raw sockets)
+    // iOS-совместимые флаги (без raw sockets):
+    //   -s N          — TCP split на позиции N (работает в sandbox)
+    //   --fake-sni X  — заменяет SNI в фейк-пакете (идёт после всех -s)
     //
-    // НЕ используем: --disorder, --oob, --ttl — требуют raw sockets, недоступны на iOS.
+    // НЕ используем: --disorder, --oob, --ttl — требуют raw sockets.
+    // ВАЖНО: позиции -s должны идти строго по возрастанию!
 
     static let youtube = ServicePreset(
         id: "youtube",
@@ -57,36 +57,43 @@ enum PresetLibrary {
     ]
 
     // ── Умное объединение пресетов ────────────────────────────────────────────
-    // Дедублирует позиции split и берёт только один fake-sni.
+    // КРИТИЧНО: byedpi требует позиции -s строго по возрастанию.
+    // --fake-sni должен идти ПОСЛЕ всех -s флагов.
     static func buildArgs(from presets: [ServicePreset]) -> [String] {
         let enabled = presets.filter(\.isEnabled)
         guard !enabled.isEmpty else { return baseArgs }
         if enabled.count == 1 { return baseArgs + enabled[0].cmdArgs }
 
-        var result = baseArgs
-        var usedPositions = Set<String>()
-        var addedSni = false
+        var splitPositions: [Int] = []
+        var fakeSni: String? = nil
 
         for preset in enabled {
             var i = 0
             let cmdArgs = preset.cmdArgs
             while i < cmdArgs.count {
                 if cmdArgs[i] == "-s", i + 1 < cmdArgs.count {
-                    let pos = cmdArgs[i + 1]
-                    if usedPositions.insert(pos).inserted {
-                        result += ["-s", pos]
+                    if let pos = Int(cmdArgs[i + 1]),
+                       !splitPositions.contains(pos) {
+                        splitPositions.append(pos)
                     }
                     i += 2
                 } else if cmdArgs[i] == "--fake-sni", i + 1 < cmdArgs.count {
-                    if !addedSni {
-                        result += ["--fake-sni", cmdArgs[i + 1]]
-                        addedSni = true
-                    }
+                    if fakeSni == nil { fakeSni = cmdArgs[i + 1] }
                     i += 2
                 } else {
                     i += 1
                 }
             }
+        }
+
+        // Сортируем позиции по возрастанию — ОБЯЗАТЕЛЬНОЕ требование byedpi
+        var result = baseArgs
+        for pos in splitPositions.sorted() {
+            result += ["-s", String(pos)]
+        }
+        // --fake-sni всегда в конце
+        if let sni = fakeSni {
+            result += ["--fake-sni", sni]
         }
         return result
     }
