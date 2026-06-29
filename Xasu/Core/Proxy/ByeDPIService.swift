@@ -14,28 +14,42 @@ final class ByeDPIService {
     var isRunning: Bool { ByeDPI.proxyStarted }
     var proxyAddress: String { "127.0.0.1:10800" }
 
-    private(set) var activeArgs: [String] = []
+    private let startDelay: TimeInterval = 0.8   // ждём освобождения порта
+    private let maxRetries = 3
 
     func start(args: [String], completion: @escaping (ProxyStartResult) -> Void) {
+        // Всегда останавливаем предыдущий экземпляр
         if isRunning { _ = ByeDPI.stop() }
-        activeArgs = args
 
-        var callbackFired = false
+        // Ждём освобождения порта, затем запускаем (с retry)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + startDelay) {
+            self.attemptStart(args: args, retriesLeft: self.maxRetries, completion: completion)
+        }
+    }
+
+    private func attemptStart(args: [String], retriesLeft: Int, completion: @escaping (ProxyStartResult) -> Void) {
+        var didCallback = false
 
         ByeDPI.start(args: args) { [weak self] error in
-            guard !callbackFired else { return }
-            callbackFired = true
-            self?.activeArgs = []
-            DispatchQueue.main.async {
-                completion(.failure(error.errorDescription))
+            guard !didCallback else { return }
+            let msg = error.errorDescription
+            // Порт занят — попробуем ещё раз
+            if (msg.contains("-2") || msg.contains("address already in use")) && retriesLeft > 0 {
+                _ = ByeDPI.stop()
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) {
+                    self?.attemptStart(args: args, retriesLeft: retriesLeft - 1, completion: completion)
+                }
+            } else {
+                didCallback = true
+                DispatchQueue.main.async { completion(.failure(msg)) }
             }
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard !callbackFired else { return }
-            guard let self else { return }
-            if self.isRunning {
-                callbackFired = true
+        // Даём 1 секунду на старт
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            guard !didCallback else { return }
+            if ByeDPI.proxyStarted {
+                didCallback = true
                 completion(.success)
             }
         }
@@ -43,7 +57,7 @@ final class ByeDPIService {
 
     @discardableResult
     func stop() -> Bool {
-        activeArgs = []
-        return ByeDPI.stop() == 0
+        let result = ByeDPI.stop()
+        return result == 0
     }
 }
