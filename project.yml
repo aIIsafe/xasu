@@ -45,8 +45,8 @@ targets:
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGN_IDENTITY: ""
-        # App Group для общения с XasuTunnel extension
-        # При подписи через Sideloadly — group ID автоматически получает префикс команды
+        # Entitlements встраиваются в бинарник — Sideloadly их подхватывает при подписи
+        CODE_SIGN_ENTITLEMENTS: Xasu/Xasu.entitlements
 
     dependencies:
       # Внедряем extension в бандл приложения
@@ -86,6 +86,7 @@ targets:
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGN_IDENTITY: ""
+        CODE_SIGN_ENTITLEMENTS: XasuTunnel/XasuTunnel.entitlements
 
     dependencies:
       - package: SwByeDPI
