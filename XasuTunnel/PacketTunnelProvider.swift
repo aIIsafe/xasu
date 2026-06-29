@@ -3,11 +3,13 @@ import SystemConfiguration
 import Tun2SocksKit
 import ByeDPIKit
 
-// Архитектура (по образцу ByeByeDPI от mIwr/SwByeDPI):
-//   TUN (10.0.0.1) → Tun2SocksKit (hev-socks5-tunnel) → byedpi на реальном IP устройства → Интернет
+// Архитектура (по образцу ByeByeDPI / Rumble):
+//   Весь трафик → TUN (10.0.0.1) → hev-socks5-tunnel (Tun2SocksKit) → byedpi на реальном IP → Интернет
 //
-// ВАЖНО: byedpi слушает на реальном Wi-Fi/LTE IP, а не 127.0.0.1.
-// Если использовать loopback, TUN перехватит пакеты byedpi в бесконечную петлю.
+// Ключ: byedpi слушает на реальном IP устройства (Wi-Fi/LTE), а не 127.0.0.1.
+// Иначе TUN перехватит пакеты byedpi и создаст бесконечную петлю.
+
+private let appGroupID = "group.com.xasu.dpiswitch"
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
 
@@ -17,47 +19,44 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
 
-        // Получаем DPI аргументы из options (переданы VPNManager) или App Group UserDefaults
-        var rawArgs = (options?["xasuArgs"] as? String) ?? ""
-        if rawArgs.isEmpty {
-            rawArgs = UserDefaults.shared.combinedArgs
-        }
-        let cmdArgs = rawArgs.isEmpty ? [] : rawArgs.components(separatedBy: " ").filter { !$0.isEmpty }
+        // Читаем сохранённые аргументы byedpi из App Group UserDefaults
+        let sharedDefaults = UserDefaults(suiteName: appGroupID)
+        let savedArgs = sharedDefaults?.string(forKey: "xasu_combinedArgs") ?? ""
+        let cmdArgs = savedArgs.isEmpty ? [] : savedArgs
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty }
 
         // Получаем реальный IP устройства (Wi-Fi или LTE) для биндинга byedpi
-        let socksListenIP = getDeviceLocalIP() ?? "0.0.0.0"
+        let socksIP = getDeviceLocalIP() ?? "0.0.0.0"
 
-        // Формируем финальные аргументы byedpi через SBDConfig (валидирует iOS-restricted флаги)
+        // Базовые аргументы byedpi (биндинг + порт)
         var byedpiArgs: [String] = [
-            "-i", socksListenIP,
+            "-i", socksIP,
             "-p", String(byedpiPort),
             "-b", "16384",
-            "-c", "512",
-            "-U"  // отключить UDP, работаем только с TCP
+            "-c", "512"
         ]
-        // Добавляем DPI-evasion аргументы (уже провалидированы SBDConfig в SOCKS режиме)
-        if !cmdArgs.isEmpty {
-            // Проверяем что нет дублирующих базовых ключей
-            let skipKeys: Set<String> = ["-i","--ip","-p","--port","-b","--bufSize","-c","--max-conn"]
-            var i = 0
-            while i < cmdArgs.count {
-                if skipKeys.contains(cmdArgs[i]) {
-                    i += 2
-                } else {
-                    byedpiArgs.append(cmdArgs[i])
-                    i += 1
-                }
+
+        // Добавляем DPI-аргументы, исключая дублирующие ключи биндинга
+        let skipKeys: Set<String> = ["-i", "--ip", "-p", "--port", "-b", "--bufSize", "-c", "--max-conn"]
+        var idx = 0
+        while idx < cmdArgs.count {
+            if skipKeys.contains(cmdArgs[idx]) {
+                idx += 2
+            } else {
+                byedpiArgs.append(cmdArgs[idx])
+                idx += 1
             }
         }
 
-        // Конфиг Tun2Socks (hev-socks5-tunnel)
-        let tun2socksConfig = """
+        // YAML конфиг hev-socks5-tunnel (Tun2SocksKit)
+        let tun2socksYAML = """
 tunnel:
   mtu: \(tunMTU)
 
 socks5:
   port: \(byedpiPort)
-  address: \(socksListenIP)
+  address: \(socksIP)
   udp: 'udp'
 
 misc:
@@ -66,21 +65,19 @@ misc:
   max-session-count: 1200
 """
 
-        // Настройки TUN интерфейса
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: socksListenIP)
+        // Настройки TUN-интерфейса
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: socksIP)
         settings.mtu = NSNumber(value: tunMTU)
 
-        // DNS: используем Google + Cloudflare
         let dns = NEDNSSettings(servers: ["8.8.8.8", "1.1.1.1"])
         dns.matchDomains = [""]
         settings.dnsSettings = dns
 
-        // IPv4: дефолтный маршрут через TUN, исключения для byedpi и DNS
         let ipv4 = NEIPv4Settings(addresses: [tunIP], subnetMasks: ["255.255.255.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()]
         ipv4.excludedRoutes = [
-            // Адрес самого byedpi — НЕ перехватываем
-            NEIPv4Route(destinationAddress: socksListenIP, subnetMask: "255.255.255.255"),
+            // Адрес byedpi — не перехватываем (избегаем петли)
+            NEIPv4Route(destinationAddress: socksIP,       subnetMask: "255.255.255.255"),
             // Локальные сети
             NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
             NEIPv4Route(destinationAddress: "10.0.0.0",    subnetMask: "255.0.0.0"),
@@ -93,38 +90,36 @@ misc:
         ]
         settings.ipv4Settings = ipv4
 
-        setTunnelNetworkSettings(settings) { error in
-            if let error = error {
-                completionHandler(error)
+        setTunnelNetworkSettings(settings) { setErr in
+            if let setErr = setErr {
+                completionHandler(setErr)
                 return
             }
 
             Task(priority: .high) {
-                // 1. Запускаем byedpi SOCKS5 прокси
+                // 1. Запускаем byedpi SOCKS5
                 if let startErr = await ByeDPI.start(args: byedpiArgs) {
                     completionHandler(startErr)
                     return
                 }
 
-                // 2. Запускаем Tun2Socks: перенаправляет TUN → byedpi SOCKS5
-                let tun2socksResult = await Socks5Tunnel.run(
-                    with: .string(content: tun2socksConfig)
-                )
-
-                if tun2socksResult == 0 {
-                    completionHandler(nil)
-                } else {
-                    _ = ByeDPI.forceStop()
-                    completionHandler(
-                        NSError(domain: NEVPNErrorDomain, code: Int(tun2socksResult))
-                    )
+                // 2. Запускаем Tun2Socks в фоне — блокирующий вызов до quit()
+                Socks5Tunnel.run(withConfig: .string(content: tun2socksYAML)) { code in
+                    // Вызывается когда туннель остановился
+                    if code != 0 {
+                        NSLog("[XasuTunnel] Tun2Socks stopped with code: \(code)")
+                    }
                 }
+
+                // Даём 300мс на инициализацию тунелля, затем сигнализируем об успехе
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                completionHandler(nil)
             }
         }
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        Socks5Tunnel.stop()
+        Socks5Tunnel.quit()
         if ByeDPI.proxyStarted { _ = ByeDPI.forceStop() }
         completionHandler()
     }
@@ -133,7 +128,7 @@ misc:
         completionHandler?(messageData)
     }
 
-    // Получаем реальный IP адрес Wi-Fi интерфейса
+    // Реальный IP Wi-Fi (en0) или LTE (pdp_ip0)
     private func getDeviceLocalIP() -> String? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
@@ -143,11 +138,12 @@ misc:
             let iface = ptr.pointee
             guard iface.ifa_addr.pointee.sa_family == UInt8(AF_INET) else { continue }
             let name = String(cString: iface.ifa_name)
-            // en0 = Wi-Fi, pdp_ip0 = LTE
             guard name.hasPrefix("en") || name.hasPrefix("pdp_ip") else { continue }
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(iface.ifa_addr, socklen_t(iface.ifa_addr.pointee.sa_len),
-                        &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+            getnameinfo(iface.ifa_addr,
+                        socklen_t(iface.ifa_addr.pointee.sa_len),
+                        &hostname, socklen_t(hostname.count),
+                        nil, 0, NI_NUMERICHOST)
             let ip = String(cString: hostname)
             if !ip.isEmpty && ip != "0.0.0.0" { return ip }
         }
