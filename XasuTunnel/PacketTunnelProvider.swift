@@ -1,34 +1,24 @@
 // PacketTunnelProvider.swift
 // XasuTunnel — Network Extension
 //
-// Запускает byedpi SOCKS5 прокси внутри extension-процесса.
-// Настраивает NEPacketTunnelNetworkSettings с PAC-прокси → byedpi.
-// Работает на Wi-Fi и LTE благодаря includeAllNetworks=true в VPNManager.
-// Бесшовное переключение сетей через NWPathMonitor + reasserting.
+// Запускает byedpi SOCKS5 прокси. Настраивает PAC-прокси через
+// NEPacketTunnelNetworkSettings. При includeAllNetworks=true (задаётся
+// в VPNManager) iOS сам обеспечивает работу на Wi-Fi и LTE.
 
 import NetworkExtension
-import Network
 import os
 import SwByeDPI
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
 
-    // MARK: - Логирование
-
-    private let log = Logger(subsystem: "com.xasu.dpiswitch.tunnel", category: "XasuTunnel")
-
-    // MARK: - Мониторинг сети
-
-    private var pathMonitor: NWPathMonitor?
-    private let pathQueue  = DispatchQueue(label: "xasu.path", qos: .utility)
-    private var lastIface: NWInterface.InterfaceType?
-    private var isReconnecting = false
-
-    // MARK: - Статистика
+    private let log = Logger(
+        subsystem: "com.xasu.dpiswitch.tunnel",
+        category: "XasuTunnel"
+    )
 
     private var packetsRead = 0
 
-    // MARK: ═══ ЖИЗНЕННЫЙ ЦИКЛ ═══
+    // MARK: - Старт туннеля
 
     override func startTunnel(
         options: [String: NSObject]?,
@@ -36,31 +26,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         log.notice("🟣 [Xasu] Tunnel starting...")
 
-        // 1. Читаем аргументы: сначала из options (переданы при старте), потом из App Group
+        // Читаем аргументы из options или из App Group UserDefaults
         let argsString = (options?["xasuArgs"] as? String)
-            ?? UserDefaults(suiteName: "group.com.xasu.dpiswitch")?.string(forKey: "xasu_combinedArgs")
+            ?? UserDefaults(suiteName: "group.com.xasu.dpiswitch")?
+                .string(forKey: "xasu_combinedArgs")
             ?? ""
 
-        let args = argsString.isEmpty
+        let args: [String] = argsString.isEmpty
             ? ["--ip", "127.0.0.1", "--port", "10800"]
             : argsString.split(separator: " ").map(String.init)
 
-        log.info("📋 [Xasu] Args: \(args.joined(separator: " "))")
+        log.info("📋 [Xasu] byedpi args: \(args.joined(separator: " "))")
 
-        // 2. Запускаем byedpi SOCKS5 прокси
-        startByeDPI(args: args) { [weak self] error in
+        // 1. Запускаем byedpi SOCKS5 прокси
+        launchByeDPI(args: args) { [weak self] error in
             guard let self else { return }
 
             if let error {
-                self.log.error("❌ [Xasu] byedpi failed: \(error.localizedDescription)")
+                self.log.error("❌ [Xasu] byedpi launch failed: \(error.localizedDescription)")
                 completionHandler(error)
                 return
             }
 
             self.log.notice("✅ [Xasu] byedpi running on 127.0.0.1:10800")
 
-            // 3. Применяем настройки туннеля
-            let settings = self.buildSettings()
+            // 2. Применяем настройки туннеля (proxy + minimal IP)
+            let settings = self.makeTunnelSettings()
             self.setTunnelNetworkSettings(settings) { settingsError in
                 if let settingsError {
                     self.log.error("❌ [Xasu] setTunnelNetworkSettings: \(settingsError.localizedDescription)")
@@ -68,77 +59,76 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     return
                 }
 
-                self.log.notice("✅ [Xasu] Network settings applied. Tunnel is active.")
-                self.startPathMonitor()
-                // Читаем пакеты, чтобы буфер не переполнился
+                self.log.notice("✅ [Xasu] Tunnel active. Wi-Fi + LTE covered via proxy.")
                 self.drainPacketFlow()
                 completionHandler(nil)
             }
         }
     }
 
+    // MARK: - Остановка туннеля
+
     override func stopTunnel(
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
-        log.notice("🔴 [Xasu] Tunnel stopping. Reason: \(reason.rawValue) | Packets read: \(self.packetsRead)")
-        pathMonitor?.cancel()
+        log.notice("🔴 [Xasu] Tunnel stopping. Reason=\(reason.rawValue) Packets=\(self.packetsRead)")
         _ = ByeDPI.forceStop()
         completionHandler()
     }
 
-    // MARK: ═══ НАСТРОЙКИ ТУННЕЛЯ ═══
+    // MARK: - Настройки туннеля
 
-    private func buildSettings() -> NEPacketTunnelNetworkSettings {
-        // tunnelRemoteAddress = любой адрес (используется только как идентификатор)
+    private func makeTunnelSettings() -> NEPacketTunnelNetworkSettings {
+        // tunnelRemoteAddress = любой адрес (для прокси-режима не важен)
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
 
-        // ── Минимальный IPv4 (нужен чтобы extension "жил") ──────────
+        // Минимальный IPv4 — нужен чтобы extension был "активен"
+        // includedRoutes пустой — трафик маршрутизируется через прокси, не через TUN
         let ipv4 = NEIPv4Settings(addresses: ["10.233.0.1"], subnetMasks: ["255.255.255.252"])
-        ipv4.includedRoutes = []   // Не маршрутизируем пакеты — используем прокси
+        ipv4.includedRoutes = []
         settings.ipv4Settings = ipv4
 
-        // ── DNS — через Google (применяется ко всем интерфейсам) ────
+        // DNS через Google — применяется ко всем интерфейсам (Wi-Fi + LTE)
         let dns = NEDNSSettings(servers: ["8.8.8.8", "1.1.1.1", "8.8.4.4"])
-        dns.matchDomains = [""]   // "" = применять ко всем доменам
+        dns.matchDomains = [""]  // "" = все домены
         settings.dnsSettings = dns
 
-        // ── PAC-прокси → byedpi SOCKS5 ───────────────────────────────
-        // Это главный механизм: весь HTTP/HTTPS трафик идёт через byedpi,
-        // который применяет TCP Split (обход DPI) перед отправкой.
+        // PAC-прокси → byedpi SOCKS5 — главный механизм обхода DPI
+        // Весь HTTP/HTTPS трафик идёт через byedpi, который делает TCP Split
         let proxy = NEProxySettings()
         proxy.autoProxyConfigurationEnabled = true
-        proxy.proxyAutoConfigurationJavaScript = xasuPAC
+        proxy.proxyAutoConfigurationJavaScript = xasuPACScript
         settings.proxySettings = proxy
 
         return settings
     }
 
-    /// PAC-файл: направляет весь HTTP/HTTPS через byedpi SOCKS5
-    private let xasuPAC = """
+    /// PAC-скрипт: все запросы кроме локальных → SOCKS5 → byedpi
+    private let xasuPACScript = """
     function FindProxyForURL(url, host) {
-        // Локальные адреса — напрямую
-        if (isPlainHostName(host) || isInNet(host, "10.0.0.0", "255.0.0.0") ||
+        if (isPlainHostName(host) ||
+            isInNet(host, "10.0.0.0", "255.0.0.0") ||
             isInNet(host, "192.168.0.0", "255.255.0.0") ||
             isInNet(host, "127.0.0.0", "255.0.0.0")) {
             return "DIRECT";
         }
-        // Весь остальной трафик через Xasu (byedpi SOCKS5)
         return "SOCKS5 127.0.0.1:10800; DIRECT";
     }
     """
 
-    // MARK: ═══ BYEDPI ═══
+    // MARK: - Запуск byedpi
 
-    private func startByeDPI(args: [String], completion: @escaping (Error?) -> Void) {
-        // Если уже запущен — перезапускаем
-        if ByeDPI.proxyStarted { _ = ByeDPI.forceStop() }
+    private func launchByeDPI(args: [String], completion: @escaping (Error?) -> Void) {
+        if ByeDPI.proxyStarted {
+            _ = ByeDPI.forceStop()
+        }
 
-        var errorFired = false
+        var didCallback = false
 
         ByeDPI.start(args: args) { byeError in
-            guard !errorFired else { return }
-            errorFired = true
+            guard !didCallback else { return }
+            didCallback = true
             let err = NSError(
                 domain: "XasuByeDPI",
                 code: -1,
@@ -147,87 +137,35 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             completion(err)
         }
 
-        // Даём byedpi ~400мс инициализироваться
+        // Даём byedpi ~400мс чтобы запуститься
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.4) {
-            guard !errorFired else { return }
+            guard !didCallback else { return }
             if ByeDPI.proxyStarted {
+                didCallback = true
                 completion(nil)
             } else {
+                didCallback = true
                 completion(NSError(
                     domain: "XasuByeDPI",
                     code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "byedpi did not start in time"]
+                    userInfo: [NSLocalizedDescriptionKey: "byedpi did not start"]
                 ))
             }
         }
     }
 
-    // MARK: ═══ БЕСШОВНОЕ ПЕРЕКЛЮЧЕНИЕ СЕТЕЙ (Wi-Fi ↔ LTE) ═══
+    // MARK: - Слив packetFlow
 
-    private func startPathMonitor() {
-        pathMonitor = NWPathMonitor()
-        pathMonitor?.pathUpdateHandler = { [weak self] path in
-            self?.handlePath(path)
-        }
-        pathMonitor?.start(queue: pathQueue)
-        log.info("📡 [Xasu] Path monitor started")
-    }
-
-    private func handlePath(_ path: NWPath) {
-        let iface: NWInterface.InterfaceType? = {
-            if path.usesInterfaceType(.wifi)     { return .wifi }
-            if path.usesInterfaceType(.cellular) { return .cellular }
-            return nil
-        }()
-
-        // Логируем только реальную смену интерфейса
-        guard iface != lastIface, path.status == .satisfied, !isReconnecting else { return }
-
-        log.notice("🔄 [Xasu] Network: \(self.ifaceName(lastIface)) → \(self.ifaceName(iface))")
-        log.info("   Interfaces: \(path.availableInterfaces.map(\.name).joined(separator:", "))")
-        lastIface = iface
-
-        isReconnecting = true
-        // `reasserting = true` — iOS не разрывает VPN-соединение приложений
-        reasserting = true
-
-        setTunnelNetworkSettings(buildSettings()) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.log.error("❌ [Xasu] Reconnect error: \(error.localizedDescription)")
-            } else {
-                self.log.notice("✅ [Xasu] Seamlessly moved to \(self.ifaceName(iface))")
-            }
-            self.reasserting = false
-            self.isReconnecting = false
-        }
-    }
-
-    // MARK: ═══ DRAIN packetFlow ═══
-
-    // Читаем пакеты из TUN чтобы буфер не блокировался.
-    // Поскольку мы используем прокси, а не маршрутизацию пакетов,
-    // реального трафика через packetFlow быть не должно.
-    // Но на случай утечки — дренируем.
+    // При прокси-режиме (нет IP-маршрутов) packetFlow почти пуст.
+    // Читаем его чтобы буфер не блокировался на случай утечки.
     private func drainPacketFlow() {
-        packetFlow.readPackets { [weak self] packets, protocols in
+        packetFlow.readPackets { [weak self] packets, _ in
             guard let self else { return }
             self.packetsRead += packets.count
-            if self.packetsRead % 200 == 0 {
-                self.log.debug("📦 [Xasu] packetFlow drained: \(self.packetsRead) packets")
+            if self.packetsRead % 200 == 0 && self.packetsRead > 0 {
+                self.log.debug("📦 [Xasu] packetFlow: \(self.packetsRead) packets drained")
             }
-            // Продолжаем читать
             self.drainPacketFlow()
-        }
-    }
-
-    // MARK: - Утилиты
-
-    private func ifaceName(_ t: NWInterface.InterfaceType?) -> String {
-        switch t {
-        case .wifi:     return "Wi-Fi"
-        case .cellular: return "LTE/5G"
-        default:        return "none"
         }
     }
 }
