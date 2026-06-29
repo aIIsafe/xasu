@@ -4,6 +4,8 @@
 <dict>
     <key>CFBundleName</key>
     <string>XasuTunnel</string>
+    <key>CFBundleDisplayName</key>
+    <string>XasuTunnel</string>
     <key>CFBundleIdentifier</key>
     <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleVersion</key>
@@ -12,6 +14,8 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
     <key>NSExtension</key>
     <dict>
         <key>NSExtensionPointIdentifier</key>
