@@ -14,15 +14,28 @@ final class ByeDPIService {
     var isRunning: Bool { ByeDPI.proxyStarted }
     var proxyAddress: String { "127.0.0.1:10800" }
 
-    func start(args: [String], completion: @escaping (ProxyStartResult) -> Void) {
-        // Полная остановка — forceStop закрывает server_fd напрямую,
-        // не зависая на fake SOCKS Hello. Это освобождает порт быстрее.
+    // Запуск через SBDConfig:
+    // - Автоматически добавляет -i, -p, -b, -c
+    // - Фильтрует iOS-несовместимые флаги (--fake-sni, --fake, --disorder, --oob, --ttl...)
+    // - Принимает ТОЛЬКО dpi-evasion аргументы (без --ip/--port)
+    func start(dpiArgs: [String], completion: @escaping (ProxyStartResult) -> Void) {
+        // Полная остановка предыдущего экземпляра
         _ = ByeDPI.forceStop()
         _ = ByeDPI.stop()
 
-        // Небольшая пауза для освобождения порта ОС
+        // Строим конфиг через SBDConfig — он сам валидирует и фильтрует
+        let config = SBDConfig(
+            listenIP:    SBDConfig.defaultListenIP,
+            listenPort:  SBDConfig.defaultListenPort,
+            bufSize:     SBDConfig.defaultBufSize,
+            maxConn:     SBDConfig.defaultMaxConn,
+            commandArgs: dpiArgs
+        )
+        let finalArgs = config.args  // уже отвалидированные аргументы
+
+        // Пауза для освобождения порта
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.6) {
-            self.attemptStart(args: args, retriesLeft: 2, completion: completion)
+            self.attemptStart(args: finalArgs, retriesLeft: 2, completion: completion)
         }
     }
 
@@ -31,13 +44,9 @@ final class ByeDPIService {
 
         ByeDPI.start(args: args) { [weak self] error in
             guard !callbackFired else { return }
-            let msg = error.errorDescription
-
-            // Извлекаем код ошибки через pattern matching
             var errCode: Int? = nil
             if case .startError(let code) = error { errCode = code }
 
-            // -2 (порт занят / неверный аргумент) — форс-стоп и повтор
             if errCode == -2 && retriesLeft > 0 {
                 _ = ByeDPI.forceStop()
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.0) {
@@ -45,18 +54,16 @@ final class ByeDPIService {
                 }
             } else {
                 callbackFired = true
-                DispatchQueue.main.async { completion(.failure(msg)) }
+                DispatchQueue.main.async { completion(.failure(error.errorDescription)) }
             }
         }
 
-        // Проверяем успешный старт через 1.2 секунды
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             guard !callbackFired else { return }
             if ByeDPI.proxyStarted {
                 callbackFired = true
                 completion(.success)
             }
-            // Если не запустился и нет ошибки — ждём callback
         }
     }
 

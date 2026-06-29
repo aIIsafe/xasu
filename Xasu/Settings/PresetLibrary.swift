@@ -3,19 +3,23 @@ import Foundation
 enum PresetLibrary {
 
     // ── Пресеты ───────────────────────────────────────────────────────────────
-    // iOS-совместимые флаги (без raw sockets):
-    //   -s N          — TCP split на позиции N (работает в sandbox)
-    //   --fake-sni X  — заменяет SNI в фейк-пакете (идёт после всех -s)
+    // cmdArgs — только DPI-evasion аргументы (без --ip/--port).
+    // SBDConfig автоматически добавляет базовые аргументы и фильтрует
+    // iOS-несовместимые флаги (--fake, --fake-sni, --disorder, --oob и т.д.)
     //
-    // НЕ используем: --disorder, --oob, --ttl — требуют raw sockets.
-    // ВАЖНО: позиции -s должны идти строго по возрастанию!
+    // Безопасные для iOS флаги:
+    //   -s N      — TCP split на позиции N
+    //   -s N+s    — split на позиции N + смещение SNI
+    //   -s N+h    — split на позиции N + смещение Host
+    //   -s 0+sm   — split в середине SNI (наиболее эффективно)
+    // Позиции ОБЯЗАНЫ идти по возрастанию при объединении.
 
     static let youtube = ServicePreset(
         id: "youtube",
         name: "YouTube",
         systemIconName: "play.rectangle.fill",
-        cmdArgs: ["-s", "2", "--fake-sni", "www.google.com"],
-        strategyDescription: "TCP Split + Fake SNI",
+        cmdArgs: ["-s", "1+s"],
+        strategyDescription: "Split at SNI offset +1",
         isEnabled: false
     )
 
@@ -23,8 +27,8 @@ enum PresetLibrary {
         id: "tiktok",
         name: "TikTok",
         systemIconName: "music.note",
-        cmdArgs: ["-s", "5", "--fake-sni", "cloudflare.com"],
-        strategyDescription: "TCP Split + Fake SNI",
+        cmdArgs: ["-s", "0+sm"],
+        strategyDescription: "Split at SNI midpoint",
         isEnabled: false
     )
 
@@ -33,7 +37,7 @@ enum PresetLibrary {
         name: "Discord",
         systemIconName: "bubble.left.and.bubble.right.fill",
         cmdArgs: ["-s", "3"],
-        strategyDescription: "TCP Split",
+        strategyDescription: "TCP Split at position 3",
         isEnabled: false
     )
 
@@ -41,44 +45,35 @@ enum PresetLibrary {
         id: "instagram",
         name: "Instagram",
         systemIconName: "camera.fill",
-        cmdArgs: ["-s", "4"],
-        strategyDescription: "TCP Split",
+        cmdArgs: ["-s", "2"],
+        strategyDescription: "TCP Split at position 2",
         isEnabled: false
     )
 
-    static var all: [ServicePreset] {
-        [youtube, tiktok, discord, instagram]
-    }
+    static var all: [ServicePreset] { [youtube, tiktok, discord, instagram] }
 
-    // ── Базовые аргументы ─────────────────────────────────────────────────────
-    static let baseArgs: [String] = [
-        "--ip", "127.0.0.1",
-        "--port", "10800"
-    ]
-
-    // ── Умное объединение пресетов ────────────────────────────────────────────
-    // КРИТИЧНО: byedpi требует позиции -s строго по возрастанию.
-    // --fake-sni должен идти ПОСЛЕ всех -s флагов.
-    static func buildArgs(from presets: [ServicePreset]) -> [String] {
+    // ── Формирование аргументов ───────────────────────────────────────────────
+    // Возвращает ТОЛЬКО DPI-evasion аргументы (без --ip/--port).
+    // ByeDPIService передаёт их в SBDConfig, который добавляет базовые аргументы.
+    static func buildDpiArgs(from presets: [ServicePreset]) -> [String] {
         let enabled = presets.filter(\.isEnabled)
-        guard !enabled.isEmpty else { return baseArgs }
-        if enabled.count == 1 { return baseArgs + enabled[0].cmdArgs }
+        guard !enabled.isEmpty else { return [] }
+        if enabled.count == 1 { return enabled[0].cmdArgs }
 
-        var splitPositions: [Int] = []
-        var fakeSni: String? = nil
+        // Объединяем: числовые позиции сортируем, позиции со спецификатором оставляем
+        var numericPositions: [Int]    = []
+        var specialPositions: [String] = []
 
         for preset in enabled {
             var i = 0
-            let cmdArgs = preset.cmdArgs
-            while i < cmdArgs.count {
-                if cmdArgs[i] == "-s", i + 1 < cmdArgs.count {
-                    if let pos = Int(cmdArgs[i + 1]),
-                       !splitPositions.contains(pos) {
-                        splitPositions.append(pos)
+            while i < preset.cmdArgs.count {
+                if preset.cmdArgs[i] == "-s", i + 1 < preset.cmdArgs.count {
+                    let pos = preset.cmdArgs[i + 1]
+                    if let n = Int(pos) {
+                        if !numericPositions.contains(n) { numericPositions.append(n) }
+                    } else {
+                        if !specialPositions.contains(pos) { specialPositions.append(pos) }
                     }
-                    i += 2
-                } else if cmdArgs[i] == "--fake-sni", i + 1 < cmdArgs.count {
-                    if fakeSni == nil { fakeSni = cmdArgs[i + 1] }
                     i += 2
                 } else {
                     i += 1
@@ -86,15 +81,24 @@ enum PresetLibrary {
             }
         }
 
-        // Сортируем позиции по возрастанию — ОБЯЗАТЕЛЬНОЕ требование byedpi
-        var result = baseArgs
-        for pos in splitPositions.sorted() {
-            result += ["-s", String(pos)]
+        var result: [String] = []
+        // Специальные позиции (0+sm, 1+s и т.д.) — перед числовыми
+        for pos in specialPositions {
+            result += ["-s", pos]
         }
-        // --fake-sni всегда в конце
-        if let sni = fakeSni {
-            result += ["--fake-sni", sni]
+        // Числовые — по возрастанию
+        for n in numericPositions.sorted() {
+            result += ["-s", String(n)]
         }
         return result
+    }
+
+    // Совместимость: старый buildArgs возвращает полные аргументы для логов
+    static func buildArgs(from presets: [ServicePreset]) -> [String] {
+        let dpi = buildDpiArgs(from: presets)
+        guard !dpi.isEmpty else {
+            return ["-i", "127.0.0.1", "-p", "10800"]
+        }
+        return ["-i", "127.0.0.1", "-p", "10800"] + dpi
     }
 }

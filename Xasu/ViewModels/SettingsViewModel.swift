@@ -19,6 +19,12 @@ final class SettingsViewModel {
         persist()
     }
 
+    /// DPI-evasion аргументы для ByeDPIService (без --ip/--port, SBDConfig добавляет сам)
+    var dpiArgs: [String] {
+        PresetLibrary.buildDpiArgs(from: presets)
+    }
+
+    /// Полные аргументы для логов и XasuTunnel (включая --ip/--port)
     var combinedArgs: [String] {
         PresetLibrary.buildArgs(from: presets)
     }

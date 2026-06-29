@@ -58,13 +58,11 @@ final class ConnectionViewModel {
 
         Task { @MainActor in
             do {
-                // Сначала пробуем VPN туннель
                 logger.log("Trying VPN mode (NEPacketTunnelProvider)...", level: .debug)
                 try await vpn.start(args: settingsVM.combinedArgs)
                 connectionMode = .vpn
                 logger.log("VPN mode started ✓", level: .success)
             } catch {
-                // VPN не доступен (нет entitlement или ошибка подписи) → SOCKS fallback
                 logger.log("VPN unavailable: \(error.localizedDescription)", level: .warning)
                 logger.log("Falling back to SOCKS5 proxy mode...", level: .info)
                 startSOCKSFallback()
@@ -73,10 +71,13 @@ final class ConnectionViewModel {
     }
 
     private func startSOCKSFallback() {
-        let args = settingsVM.combinedArgs
+        let dpiArgs = settingsVM.dpiArgs
         logger.log("Starting byedpi SOCKS5 on 127.0.0.1:10800", level: .debug)
+        if !dpiArgs.isEmpty {
+            logger.log("DPI args (validated by SBDConfig): \(dpiArgs.joined(separator: " "))", level: .debug)
+        }
 
-        socks.start(args: args) { [weak self] result in
+        socks.start(dpiArgs: dpiArgs) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
