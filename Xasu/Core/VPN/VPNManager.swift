@@ -96,16 +96,20 @@ final class VPNManager {
         proto.providerBundleIdentifier = tunnelBundleID
         proto.serverAddress            = "Xasu DPI Bypass"
 
-        // ── КЛЮЧЕВЫЕ ПАРАМЕТРЫ ДЛЯ LTE + Wi-Fi ──────────────────────
-        // Весь трафик (и Wi-Fi, и LTE) идёт через VPN
-        proto.includeAllNetworks       = true
-        // Не исключать локальную сеть — весь трафик через нас
-        proto.excludeLocalNetworks     = false
-        // Apple-сервисы тоже через туннель (чтобы не рвались push-уведомления при смене сети)
-        proto.excludeAPNs              = true   // APNs исключаем — нужны для уведомлений
-        proto.excludeCellularServices  = false
-        // Держать маршруты в приоритете
-        proto.enforceRoutes            = true
+        // ── ПАРАМЕТРЫ ДЛЯ БЕСШОВНОГО Wi-Fi ↔ LTE ────────────────────
+        // false = маршруты из PacketTunnelProvider решают что идёт через VPN.
+        // true принудительно блокирует ВСЁ при смене сети, вызывая разрывы.
+        proto.includeAllNetworks       = false
+        // Исключаем локальную сеть (192.168.x.x) — чтобы работали принтеры/Bonjour
+        proto.excludeLocalNetworks     = true
+        // APNs (push-уведомления) — всегда напрямую, не через VPN
+        proto.excludeAPNs              = true
+        // iOS 16.4+: не блокировать сотовые сервисы при смене сети
+        if #available(iOS 16.4, *) { proto.excludeAPNs = true }
+        // iOS 17.4+: не блокировать связь устройства при переключении
+        if #available(iOS 17.4, *) { proto.excludeDeviceCommunication = true }
+        // НЕ enforceRoutes — позволяет iOS плавно переключаться между сетями
+        proto.enforceRoutes            = false
         // ─────────────────────────────────────────────────────────────
 
         mgr.protocolConfiguration  = proto
