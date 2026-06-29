@@ -15,6 +15,9 @@ packages:
   SwByeDPI:
     url: https://github.com/mIwr/SwByeDPI
     from: "0.17.3"
+  Tun2SocksKit:
+    url: https://github.com/EbrahimTahernejad/Tun2SocksKit
+    from: "5.14.4"
 
 targets:
 
@@ -98,3 +101,5 @@ targets:
         product: SwByeDPI
       - package: SwByeDPI
         product: ByeDPIKit
+      - package: Tun2SocksKit
+        product: Tun2SocksKit

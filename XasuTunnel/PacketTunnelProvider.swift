@@ -1,171 +1,156 @@
-// PacketTunnelProvider.swift
-// XasuTunnel — Network Extension
-//
-// Запускает byedpi SOCKS5 прокси. Настраивает PAC-прокси через
-// NEPacketTunnelNetworkSettings. При includeAllNetworks=true (задаётся
-// в VPNManager) iOS сам обеспечивает работу на Wi-Fi и LTE.
-
 import NetworkExtension
-import os
-import SwByeDPI
+import SystemConfiguration
+import Tun2SocksKit
+import ByeDPIKit
 
-final class PacketTunnelProvider: NEPacketTunnelProvider {
+// Архитектура (по образцу ByeByeDPI от mIwr/SwByeDPI):
+//   TUN (10.0.0.1) → Tun2SocksKit (hev-socks5-tunnel) → byedpi на реальном IP устройства → Интернет
+//
+// ВАЖНО: byedpi слушает на реальном Wi-Fi/LTE IP, а не 127.0.0.1.
+// Если использовать loopback, TUN перехватит пакеты byedpi в бесконечную петлю.
 
-    private let log = Logger(
-        subsystem: "com.xasu.dpiswitch.tunnel",
-        category: "XasuTunnel"
-    )
+class PacketTunnelProvider: NEPacketTunnelProvider {
 
-    private var packetsRead = 0
+    private let tunIP      = "10.0.0.1"
+    private let byedpiPort: UInt16 = 10800
+    private let tunMTU     = 1500
 
-    // MARK: - Старт туннеля
+    override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
 
-    override func startTunnel(
-        options: [String: NSObject]?,
-        completionHandler: @escaping (Error?) -> Void
-    ) {
-        log.notice("🟣 [Xasu] Tunnel starting...")
+        // Получаем DPI аргументы из options (переданы VPNManager) или App Group UserDefaults
+        var rawArgs = (options?["xasuArgs"] as? String) ?? ""
+        if rawArgs.isEmpty {
+            rawArgs = UserDefaults.shared.combinedArgs
+        }
+        let cmdArgs = rawArgs.isEmpty ? [] : rawArgs.components(separatedBy: " ").filter { !$0.isEmpty }
 
-        // Читаем аргументы из options или из App Group UserDefaults
-        let argsString = (options?["xasuArgs"] as? String)
-            ?? UserDefaults(suiteName: "group.com.xasu.dpiswitch")?
-                .string(forKey: "xasu_combinedArgs")
-            ?? ""
+        // Получаем реальный IP устройства (Wi-Fi или LTE) для биндинга byedpi
+        let socksListenIP = getDeviceLocalIP() ?? "0.0.0.0"
 
-        let args: [String] = argsString.isEmpty
-            ? ["--ip", "127.0.0.1", "--port", "10800"]
-            : argsString.split(separator: " ").map(String.init)
+        // Формируем финальные аргументы byedpi через SBDConfig (валидирует iOS-restricted флаги)
+        var byedpiArgs: [String] = [
+            "-i", socksListenIP,
+            "-p", String(byedpiPort),
+            "-b", "16384",
+            "-c", "512",
+            "-U"  // отключить UDP, работаем только с TCP
+        ]
+        // Добавляем DPI-evasion аргументы (уже провалидированы SBDConfig в SOCKS режиме)
+        if !cmdArgs.isEmpty {
+            // Проверяем что нет дублирующих базовых ключей
+            let skipKeys: Set<String> = ["-i","--ip","-p","--port","-b","--bufSize","-c","--max-conn"]
+            var i = 0
+            while i < cmdArgs.count {
+                if skipKeys.contains(cmdArgs[i]) {
+                    i += 2
+                } else {
+                    byedpiArgs.append(cmdArgs[i])
+                    i += 1
+                }
+            }
+        }
 
-        log.info("📋 [Xasu] byedpi args: \(args.joined(separator: " "))")
+        // Конфиг Tun2Socks (hev-socks5-tunnel)
+        let tun2socksConfig = """
+tunnel:
+  mtu: \(tunMTU)
 
-        // 1. Запускаем byedpi SOCKS5 прокси
-        launchByeDPI(args: args) { [weak self] error in
-            guard let self else { return }
+socks5:
+  port: \(byedpiPort)
+  address: \(socksListenIP)
+  udp: 'udp'
 
-            if let error {
-                self.log.error("❌ [Xasu] byedpi launch failed: \(error.localizedDescription)")
+misc:
+  task-stack-size: 24576
+  tcp-buffer-size: 4096
+  max-session-count: 1200
+"""
+
+        // Настройки TUN интерфейса
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: socksListenIP)
+        settings.mtu = NSNumber(value: tunMTU)
+
+        // DNS: используем Google + Cloudflare
+        let dns = NEDNSSettings(servers: ["8.8.8.8", "1.1.1.1"])
+        dns.matchDomains = [""]
+        settings.dnsSettings = dns
+
+        // IPv4: дефолтный маршрут через TUN, исключения для byedpi и DNS
+        let ipv4 = NEIPv4Settings(addresses: [tunIP], subnetMasks: ["255.255.255.0"])
+        ipv4.includedRoutes = [NEIPv4Route.default()]
+        ipv4.excludedRoutes = [
+            // Адрес самого byedpi — НЕ перехватываем
+            NEIPv4Route(destinationAddress: socksListenIP, subnetMask: "255.255.255.255"),
+            // Локальные сети
+            NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
+            NEIPv4Route(destinationAddress: "10.0.0.0",    subnetMask: "255.0.0.0"),
+            NEIPv4Route(destinationAddress: "172.16.0.0",  subnetMask: "255.240.0.0"),
+            // DNS серверы — прямой доступ
+            NEIPv4Route(destinationAddress: "8.8.8.8",     subnetMask: "255.255.255.255"),
+            NEIPv4Route(destinationAddress: "8.8.4.4",     subnetMask: "255.255.255.255"),
+            NEIPv4Route(destinationAddress: "1.1.1.1",     subnetMask: "255.255.255.255"),
+            NEIPv4Route(destinationAddress: "1.0.0.1",     subnetMask: "255.255.255.255"),
+        ]
+        settings.ipv4Settings = ipv4
+
+        setTunnelNetworkSettings(settings) { error in
+            if let error = error {
                 completionHandler(error)
                 return
             }
 
-            self.log.notice("✅ [Xasu] byedpi running on 127.0.0.1:10800")
-
-            // 2. Применяем настройки туннеля (proxy + minimal IP)
-            let settings = self.makeTunnelSettings()
-            self.setTunnelNetworkSettings(settings) { settingsError in
-                if let settingsError {
-                    self.log.error("❌ [Xasu] setTunnelNetworkSettings: \(settingsError.localizedDescription)")
-                    completionHandler(settingsError)
+            Task(priority: .high) {
+                // 1. Запускаем byedpi SOCKS5 прокси
+                if let startErr = await ByeDPI.start(args: byedpiArgs) {
+                    completionHandler(startErr)
                     return
                 }
 
-                self.log.notice("✅ [Xasu] Tunnel active. Wi-Fi + LTE covered via proxy.")
-                self.drainPacketFlow()
-                completionHandler(nil)
+                // 2. Запускаем Tun2Socks: перенаправляет TUN → byedpi SOCKS5
+                let tun2socksResult = await Socks5Tunnel.run(
+                    with: .string(content: tun2socksConfig)
+                )
+
+                if tun2socksResult == 0 {
+                    completionHandler(nil)
+                } else {
+                    _ = ByeDPI.forceStop()
+                    completionHandler(
+                        NSError(domain: NEVPNErrorDomain, code: Int(tun2socksResult))
+                    )
+                }
             }
         }
     }
 
-    // MARK: - Остановка туннеля
-
-    override func stopTunnel(
-        with reason: NEProviderStopReason,
-        completionHandler: @escaping () -> Void
-    ) {
-        log.notice("🔴 [Xasu] Tunnel stopping. Reason=\(reason.rawValue) Packets=\(self.packetsRead)")
-        _ = ByeDPI.forceStop()
+    override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        Socks5Tunnel.stop()
+        if ByeDPI.proxyStarted { _ = ByeDPI.forceStop() }
         completionHandler()
     }
 
-    // MARK: - Настройки туннеля
-
-    private func makeTunnelSettings() -> NEPacketTunnelNetworkSettings {
-        // tunnelRemoteAddress = любой адрес (для прокси-режима не важен)
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
-
-        // Минимальный IPv4 — нужен чтобы extension был "активен"
-        // includedRoutes пустой — трафик маршрутизируется через прокси, не через TUN
-        let ipv4 = NEIPv4Settings(addresses: ["10.233.0.1"], subnetMasks: ["255.255.255.252"])
-        ipv4.includedRoutes = []
-        settings.ipv4Settings = ipv4
-
-        // DNS через Google — применяется ко всем интерфейсам (Wi-Fi + LTE)
-        let dns = NEDNSSettings(servers: ["8.8.8.8", "1.1.1.1", "8.8.4.4"])
-        dns.matchDomains = [""]  // "" = все домены
-        settings.dnsSettings = dns
-
-        // PAC-прокси → byedpi SOCKS5 — главный механизм обхода DPI
-        // Весь HTTP/HTTPS трафик идёт через byedpi, который делает TCP Split
-        let proxy = NEProxySettings()
-        proxy.autoProxyConfigurationEnabled = true
-        proxy.proxyAutoConfigurationJavaScript = xasuPACScript
-        settings.proxySettings = proxy
-
-        return settings
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        completionHandler?(messageData)
     }
 
-    /// PAC-скрипт: все запросы кроме локальных → SOCKS5 → byedpi
-    private let xasuPACScript = """
-    function FindProxyForURL(url, host) {
-        if (isPlainHostName(host) ||
-            isInNet(host, "10.0.0.0", "255.0.0.0") ||
-            isInNet(host, "192.168.0.0", "255.255.0.0") ||
-            isInNet(host, "127.0.0.0", "255.0.0.0")) {
-            return "DIRECT";
+    // Получаем реальный IP адрес Wi-Fi интерфейса
+    private func getDeviceLocalIP() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let iface = ptr.pointee
+            guard iface.ifa_addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: iface.ifa_name)
+            // en0 = Wi-Fi, pdp_ip0 = LTE
+            guard name.hasPrefix("en") || name.hasPrefix("pdp_ip") else { continue }
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            getnameinfo(iface.ifa_addr, socklen_t(iface.ifa_addr.pointee.sa_len),
+                        &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+            let ip = String(cString: hostname)
+            if !ip.isEmpty && ip != "0.0.0.0" { return ip }
         }
-        return "SOCKS5 127.0.0.1:10800; DIRECT";
-    }
-    """
-
-    // MARK: - Запуск byedpi
-
-    private func launchByeDPI(args: [String], completion: @escaping (Error?) -> Void) {
-        if ByeDPI.proxyStarted {
-            _ = ByeDPI.forceStop()
-        }
-
-        var didCallback = false
-
-        ByeDPI.start(args: args) { byeError in
-            guard !didCallback else { return }
-            didCallback = true
-            let err = NSError(
-                domain: "XasuByeDPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: byeError.errorDescription]
-            )
-            completion(err)
-        }
-
-        // Даём byedpi ~400мс чтобы запуститься
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.4) {
-            guard !didCallback else { return }
-            if ByeDPI.proxyStarted {
-                didCallback = true
-                completion(nil)
-            } else {
-                didCallback = true
-                completion(NSError(
-                    domain: "XasuByeDPI",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "byedpi did not start"]
-                ))
-            }
-        }
-    }
-
-    // MARK: - Слив packetFlow
-
-    // При прокси-режиме (нет IP-маршрутов) packetFlow почти пуст.
-    // Читаем его чтобы буфер не блокировался на случай утечки.
-    private func drainPacketFlow() {
-        packetFlow.readPackets { [weak self] packets, _ in
-            guard let self else { return }
-            self.packetsRead += packets.count
-            if self.packetsRead % 200 == 0 && self.packetsRead > 0 {
-                self.log.debug("📦 [Xasu] packetFlow: \(self.packetsRead) packets drained")
-            }
-            self.drainPacketFlow()
-        }
+        return nil
     }
 }
